@@ -573,12 +573,12 @@ def mark_key_klines(security, start_date, end_date, frequency='1d', debug=False)
 
 
 
-def filter_stocks(concept_code, end_date=None, count=None, start_date=None, frequency='1d', debug=False):
+def batch_filter_stocks(concept_names, end_date=None, count=None, start_date=None, frequency='1d', debug=False):
     """
-    选择概念板块内符合B1的股票
+    批量查询多个概念板块中符合B1的股票
 
     参数：
-        concept_code: str, 概念板块代码，如 'SC0084'
+        concept_names: str, 板块名称，多个板块用'|'分隔，如 '风电|光伏'，只支持精准匹配
         end_date: str, 结束日期 (格式: 'YYYY-MM-DD')，默认为当前日期
         count: int, 数据量，与 start_date 二选一，不可同时使用，必须大于0
                表示返回结束日期之前count个交易数据，包含结束日期
@@ -587,7 +587,10 @@ def filter_stocks(concept_code, end_date=None, count=None, start_date=None, freq
         debug: bool, 是否打印调试信息，默认为False
 
     返回：
-        DataFrame: 包含符合B1条件的股票信息，columns为['股票代码', '最近一次B1时间', 'B1出现次数']
+        Tuple(DataFrame, DataFrame): 返回符合B1条件的股票信息和股票的B1标记数据
+            - 符合B1的信息汇总: DataFrame, index为股票代码, columns为['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的板块']
+            - 股票的B1标记数据集: DataFrame, index为['交易时间', '股票代码'], columns为['小阴小阳', '十字星', 'B1']
+                               由所有相关股票的B1标记数据合并去重取得
     """
     # 验证参数：count和start_date不可同时使用
     if count is not None and start_date is not None:
@@ -621,103 +624,6 @@ def filter_stocks(concept_code, end_date=None, count=None, start_date=None, freq
     elif start_date is None:
         raise ValueError("必须提供 start_date 或 count 参数之一")
 
-    # 获取概念板块内的所有股票
-    concept_stocks = get_concept_stocks(concept_code, date=end_date)
-
-    if not concept_stocks:
-        print(f"概念板块 {concept_code} 没有获取到股票")
-        return []
-
-    # 使用向量化操作过滤股票，减少API调用
-    # 先用字符串操作过滤代码前缀（避免调用API）
-    concept_stocks_series = pd.Series(concept_stocks)
-    # 过滤创业板 (30开头) 和 北交所 (8开头或4开头)
-    code_filter_mask = ~concept_stocks_series.str.startswith('300') & \
-                       ~concept_stocks_series.str.startswith('301') & \
-                       ~concept_stocks_series.str.startswith('8') & \
-                       ~concept_stocks_series.str.startswith('4')
-    filtered_by_code = concept_stocks_series[code_filter_mask].tolist()
-
-    # 对于剩余股票，只对代码前缀无法判断的（如ST），获取一次所有股票信息进行过滤
-    if filtered_by_code:
-        # 批量获取剩余股票的名称信息（通过get_all_securities获取所有股票信息）
-        all_stocks = get_all_securities(types=['stock'])
-
-        # 创建过滤后的股票集合
-        filtered_set = set(filtered_by_code)
-        # 获取这些股票的名称信息
-        filtered_with_info = all_stocks[all_stocks.index.isin(filtered_set)]
-
-        # 过滤ST股票（使用display_name字段）
-        non_st_mask = ~filtered_with_info['display_name'].str.contains('ST|\*ST', na=False)
-        filtered_stocks = filtered_with_info[non_st_mask].index.tolist()
-    else:
-        filtered_stocks = []
-
-    print(f"概念板块 {concept_code} 共有 {len(concept_stocks)} 只股票，过滤后剩余 {len(filtered_stocks)} 只")
-
-    # 遍历所有股票，找出符合B1条件的
-    b1_stocks_data = []
-
-    for stock_code in filtered_stocks:
-        try:
-            # 调用标记关键K线函数
-            result = mark_key_klines(stock_code, start_date, end_date, frequency, debug=debug)
-
-            # 检查是否有B1标记
-            if result['B1'].any():
-                # 获取B1标记的所有行
-                b1_rows = result[result['B1']]
-                # 获取最后一个B1出现的日期
-                last_b1_date = b1_rows.index[-1]
-                # 统计B1出现的次数
-                b1_count = len(b1_rows)
-
-                b1_stocks_data.append({
-                    '股票代码': stock_code,
-                    '最近一次B1时间': last_b1_date.strftime('%Y-%m-%d'),
-                    'B1出现次数': b1_count
-                })
-
-                if debug:
-                    print(f"发现B1股票: {stock_code} - "
-                          f"最后B1日期: {last_b1_date.strftime('%Y-%m-%d')}, "
-                          f"B1次数: {b1_count}")
-        except Exception as e:
-            if debug:
-                print(f"处理股票 {stock_code} 时出错: {str(e)}")
-            continue
-
-    print(f"\n共找到 {len(b1_stocks_data)} 只符合B1条件的股票")
-
-    # 返回DataFrame
-    if b1_stocks_data:
-        return pd.DataFrame(b1_stocks_data, index=None)[['股票代码', '最近一次B1时间', 'B1出现次数']]
-    else:
-        return pd.DataFrame(columns=['股票代码', '最近一次B1时间', 'B1出现次数'])
-
-
-def batch_filter_stocks(concept_names, end_date=None, count=None, start_date=None, frequency='1d', debug=False):
-    """
-    批量查询多个概念板块中符合B1的股票
-
-    参数：
-        concept_names: str, 板块名称或关键字，多个板块用'|'分隔，如 '风电|光伏'
-        end_date: str, 结束日期 (格式: 'YYYY-MM-DD')，默认为当前日期
-        count: int, 数据量，与 start_date 二选一，不可同时使用，必须大于0
-        start_date: str, 起始日期 (格式: 'YYYY-MM-DD')，与 count 二选一
-        frequency: str, K线周期，可选值: '1d', '1w', '1m', '3m', '6m', '1y'，默认为'1d'
-        debug: bool, 是否打印调试信息，默认为False
-
-    返回：
-        Tuple(DataFrame, dict): 返回符合B1条件的股票信息和股票的B1标记数据
-            - 符合B1的信息汇总: DataFrame, columns为['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的板块']
-            - 股票的B1标记数据: dict, key为股票代码，value为该股票的B1标记DataFrame
-    """
-    # 设置默认结束日期为今天
-    if end_date is None:
-        end_date = dt.today().strftime('%Y-%m-%d')
-
     # 解析板块名称列表
     name_list = [name.strip() for name in concept_names.split('|') if name.strip()]
 
@@ -745,37 +651,73 @@ def batch_filter_stocks(concept_names, end_date=None, count=None, start_date=Non
 
     if not concept_code_map:
         print("错误: 没有找到匹配的板块")
-        return pd.DataFrame(columns=['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的板块']), {}
+        empty_df = pd.DataFrame(columns=['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的板块'])
+        empty_df.index.name = '股票代码'
+        empty_b1_df = pd.DataFrame(columns=['小阴小阳', '十字星', 'B1'])
+        empty_b1_df.index = pd.MultiIndex.from_arrays([[], []], names=['交易时间', '股票代码'])
+        return empty_df, empty_b1_df
 
     print(f"共匹配到 {len(concept_code_map)} 个板块")
     print("="*80)
 
     # 用于存储所有股票的结果（去重）
     stock_results = {}  # 股票代码 -> {'股票代码': xxx, '最近一次B1时间': xxx, 'B1出现次数': xxx, '涉及的板块': xxx}
-    # 用于存储股票的B1标记数据
-    stock_b1_data = {}  # 股票代码 -> DataFrame(B1标记数据)
+    # 用于存储所有股票的B1标记数据（合并为DataFrame）
+    all_b1_markings = []  # 存储 all B1标记数据的列表
 
-    # 遍历每个板块，调用filter_stocks
+    # 遍历每个板块，获取股票代码并处理
     for concept_code, concept_name in concept_code_map.items():
         print(f"\n查询板块: {concept_name} ({concept_code})")
 
-        try:
-            # 调用单板块查询函数
-            result_df = filter_stocks(
-                concept_code=concept_code,
-                end_date=end_date,
-                count=count,
-                start_date=start_date,
-                frequency=frequency,
-                debug=debug
-            )
+        # 获取概念板块内的所有股票
+        concept_stocks = get_concept_stocks(concept_code, date=end_date)
 
-            if not result_df.empty:
-                # 合并结果
-                for idx, row in result_df.iterrows():
-                    stock_code = row['股票代码']
-                    b1_time = row['最近一次B1时间']
-                    b1_count = row['B1出现次数']
+        if not concept_stocks:
+            print(f"概念板块 {concept_code} 没有获取到股票")
+            continue
+
+        # 使用向量化操作过滤股票，减少API调用
+        # 先用字符串操作过滤代码前缀（避免调用API）
+        concept_stocks_series = pd.Series(concept_stocks)
+        # 过滤创业板 (30开头) 和 北交所 (8开头或4开头)
+        code_filter_mask = ~concept_stocks_series.str.startswith('300') & \
+                           ~concept_stocks_series.str.startswith('301') & \
+                           ~concept_stocks_series.str.startswith('8') & \
+                           ~concept_stocks_series.str.startswith('4')
+        filtered_by_code = concept_stocks_series[code_filter_mask].tolist()
+
+        # 对于剩余股票，只对代码前缀无法判断的（如ST），获取一次所有股票信息进行过滤
+        if filtered_by_code:
+            # 批量获取剩余股票的名称信息（通过get_all_securities获取所有股票信息）
+            all_stocks = get_all_securities(types=['stock'])
+
+            # 创建过滤后的股票集合
+            filtered_set = set(filtered_by_code)
+            # 获取这些股票的名称信息
+            filtered_with_info = all_stocks[all_stocks.index.isin(filtered_set)]
+
+            # 过滤ST股票（使用display_name字段）
+            non_st_mask = ~filtered_with_info['display_name'].str.contains('ST|\*ST', na=False)
+            filtered_stocks = filtered_with_info[non_st_mask].index.tolist()
+        else:
+            filtered_stocks = []
+
+        print(f"概念板块 {concept_code} 共有 {len(concept_stocks)} 只股票，过滤后剩余 {len(filtered_stocks)} 只")
+
+        # 遍历所有股票，找出符合B1条件的
+        for stock_code in filtered_stocks:
+            try:
+                # 调用标记关键K线函数
+                b1_detail = mark_key_klines(stock_code, start_date, end_date, frequency, debug=False)
+
+                # 检查是否有B1标记
+                if not b1_detail.empty and b1_detail['B1'].any():
+                    # 获取B1标记的所有行
+                    b1_rows = b1_detail[b1_detail['B1']]
+                    # 获取最后一个B1出现的日期
+                    last_b1_date = b1_rows.index[-1]
+                    # 统计B1出现的次数
+                    b1_count = len(b1_rows)
 
                     if stock_code in stock_results:
                         # 股票已存在，更新涉及的板块
@@ -787,8 +729,8 @@ def batch_filter_stocks(concept_names, end_date=None, count=None, start_date=Non
                             stock_results[stock_code]['涉及的板块'] = '|'.join(existing_sectors)
 
                         # 更新B1时间（取最新的）
-                        if b1_time > existing['最近一次B1时间']:
-                            stock_results[stock_code]['最近一次B1时间'] = b1_time
+                        if last_b1_date.strftime('%Y-%m-%d') > existing['最近一次B1时间']:
+                            stock_results[stock_code]['最近一次B1时间'] = last_b1_date.strftime('%Y-%m-%d')
 
                         # 累加B1出现次数
                         stock_results[stock_code]['B1出现次数'] += b1_count
@@ -796,42 +738,61 @@ def batch_filter_stocks(concept_names, end_date=None, count=None, start_date=Non
                         # 新股票
                         stock_results[stock_code] = {
                             '股票代码': stock_code,
-                            '最近一次B1时间': b1_time,
+                            '最近一次B1时间': last_b1_date.strftime('%Y-%m-%d'),
                             'B1出现次数': b1_count,
                             '涉及的板块': concept_name
                         }
 
-                    # 获取该股票的B1标记数据
-                    try:
-                        b1_detail = mark_key_klines(stock_code, start_date, end_date, frequency, debug=False)
-                        if not b1_detail.empty:
-                            stock_b1_data[stock_code] = b1_detail
-                    except Exception as e:
-                        if debug:
-                            print(f"获取股票 {stock_code} 的B1标记数据时出错: {str(e)}")
-                        continue
-        except Exception as e:
-            print(f"查询板块 {concept_name} 时出错: {str(e)}")
-            continue
+                    # 保存B1标记数据
+                    b1_detail_indexed = b1_detail.copy()
+                    b1_detail_indexed['交易时间'] = b1_detail_indexed.index
+                    b1_detail_indexed.set_index(['交易时间', '股票代码'], inplace=True)
+                    all_b1_markings.append(b1_detail_indexed)
+
+                    if debug:
+                        print(f"发现B1股票: {stock_code} - "
+                              f"最后B1日期: {last_b1_date.strftime('%Y-%m-%d')}, "
+                              f"B1次数: {b1_count}")
+
+            except Exception as e:
+                if debug:
+                    print(f"处理股票 {stock_code} 时出错: {str(e)}")
+                continue
 
     # 转换为DataFrame
     if stock_results:
         result_df = pd.DataFrame(list(stock_results.values()), index=None)
+        result_df.set_index('股票代码', inplace=True)
 
         # 按最近一次B1时间降序排序
-        result_df = result_df.sort_values(by='最近一次B1时间', ascending=False).reset_index(drop=True)
+        result_df = result_df.sort_values(by='最近一次B1时间', ascending=False)
 
         print(f"\n{'='*80}")
         print(f"批量查询完成，共找到 {len(result_df)} 只符合B1条件的股票")
         print(f"{'='*80}")
 
-        return result_df, stock_b1_data
+        # 合并所有B1标记数据并去重
+        if all_b1_markings:
+            b1_data_df = pd.concat(all_b1_markings)
+            # 按索引去重（交易时间, 股票代码）
+            b1_data_df = b1_data_df[~b1_data_df.index.duplicated(keep='last')]
+        else:
+            b1_data_df = pd.DataFrame(columns=['小阴小阳', '十字星', 'B1'])
+            # 创建空的复合索引（交易时间, 股票代码）
+            b1_data_df.index = pd.MultiIndex.from_arrays([[], []], names=['交易时间', '股票代码'])
+
+        return result_df, b1_data_df
     else:
         print(f"\n{'='*80}")
         print("批量查询完成，未找到符合B1条件的股票")
         print(f"{'='*80}")
 
-        return pd.DataFrame(columns=['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的板块']), {}
+        empty_df = pd.DataFrame(columns=['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的板块'])
+        empty_df.index.name = '股票代码'
+        empty_b1_df = pd.DataFrame(columns=['小阴小阳', '十字星', 'B1'])
+        # 创建空的复合索引（交易时间, 股票代码）
+        empty_b1_df.index = pd.MultiIndex.from_arrays([[], []], names=['交易时间', '股票代码'])
+        return empty_df, empty_b1_df
 
 
 def load_custom_stocks_config():
@@ -949,9 +910,10 @@ def filter_custom_stocks(group_names, end_date=None, count=None, start_date=None
         debug: bool, 是否打印调试信息，默认为False
 
     返回：
-        Tuple(DataFrame, dict): 返回符合B1条件的股票信息和股票的B1标记数据
-            - 符合B1的信息汇总: DataFrame, columns为['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的自选组']
-            - 股票的B1标记数据: dict, key为股票代码，value为该股票的B1标记DataFrame
+        Tuple(DataFrame, DataFrame): 返回符合B1条件的股票信息和股票的B1标记数据
+            - 符合B1的信息汇总: DataFrame, index为股票代码, columns为['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的自选组']
+            - 股票的B1标记数据集: DataFrame, index为['交易时间', '股票代码'], columns为['小阴小阳', '十字星', 'B1']
+                               由所有相关股票的B1标记数据合并去重取得
     """
     # 验证参数：count和start_date不可同时使用
     if count is not None and start_date is not None:
@@ -1032,8 +994,8 @@ def filter_custom_stocks(group_names, end_date=None, count=None, start_date=None
 
     # 用于存储所有股票的结果
     stock_results = {}  # 股票代码 -> {'股票代码': xxx, '最近一次B1时间': xxx, 'B1出现次数': xxx, '涉及的自选组': xxx}
-    # 用于存储股票的B1标记数据
-    stock_b1_data = {}  # 股票代码 -> DataFrame(B1标记数据)
+    # 用于存储所有股票的B1标记数据（合并为DataFrame）
+    all_b1_markings = []  # 存储 all B1标记数据的列表
 
     # 遍历所有股票，找出符合B1条件的
     for stock_code, group_list in stock_groups.items():
@@ -1058,7 +1020,10 @@ def filter_custom_stocks(group_names, end_date=None, count=None, start_date=None
                 }
 
                 # 保存B1标记数据
-                stock_b1_data[stock_code] = result
+                result_indexed = result.copy()
+                result_indexed['交易时间'] = result_indexed.index
+                result_indexed.set_index(['交易时间', '股票代码'], inplace=True)
+                all_b1_markings.append(result_indexed)
 
                 if debug:
                     print(f"发现B1股票: {stock_code} - "
@@ -1073,24 +1038,40 @@ def filter_custom_stocks(group_names, end_date=None, count=None, start_date=None
     # 转换为DataFrame
     if stock_results:
         result_df = pd.DataFrame(list(stock_results.values()), index=None)
+        result_df.set_index('股票代码', inplace=True)
 
         # 确保列顺序
         result_df = result_df[['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的自选组']]
 
         # 按最近一次B1时间降序排序
-        result_df = result_df.sort_values(by='最近一次B1时间', ascending=False).reset_index(drop=True)
+        result_df = result_df.sort_values(by='最近一次B1时间', ascending=False)
 
         print(f"\n{'='*80}")
         print(f"自选股查询完成，共找到 {len(result_df)} 只符合B1条件的股票")
         print(f"{'='*80}")
 
-        return result_df, stock_b1_data
+        # 合并所有B1标记数据并去重
+        if all_b1_markings:
+            b1_data_df = pd.concat(all_b1_markings)
+            # 按索引去重（交易时间, 股票代码）
+            b1_data_df = b1_data_df[~b1_data_df.index.duplicated(keep='last')]
+        else:
+            b1_data_df = pd.DataFrame(columns=['小阴小阳', '十字星', 'B1'])
+            # 创建空的复合索引（交易时间, 股票代码）
+            b1_data_df.index = pd.MultiIndex.from_arrays([[], []], names=['交易时间', '股票代码'])
+
+        return result_df, b1_data_df
     else:
         print(f"\n{'='*80}")
         print("自选股查询完成，未找到符合B1条件的股票")
         print(f"{'='*80}")
 
-        return pd.DataFrame(columns=['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的自选组']), {}
+        empty_df = pd.DataFrame(columns=['股票代码', '最近一次B1时间', 'B1出现次数', '涉及的自选组'])
+        empty_df.index.name = '股票代码'
+        empty_b1_df = pd.DataFrame(columns=['小阴小阳', '十字星', 'B1'])
+        # 创建空的复合索引（交易时间, 股票代码）
+        empty_b1_df.index = pd.MultiIndex.from_arrays([[], []], names=['交易时间', '股票代码'])
+        return empty_df, empty_b1_df
 
 
 def full_scan_b1_stocks(end_date=None, count=None, start_date=None, frequency='1d', debug=False):
@@ -1106,9 +1087,10 @@ def full_scan_b1_stocks(end_date=None, count=None, start_date=None, frequency='1
         debug: bool, 是否打印调试信息，默认为False
 
     返回：
-        Tuple(DataFrame, dict): 返回符合B1条件的股票信息和股票的B1标记数据
-            - 符合B1的信息汇总: DataFrame, columns为['股票代码', '最近一次B1时间', 'B1出现次数']
-            - 股票的B1标记数据: dict, key为股票代码，value为该股票的B1标记DataFrame
+        Tuple(DataFrame, DataFrame): 返回符合B1条件的股票信息和股票的B1标记数据
+            - 符合B1的信息汇总: DataFrame, index为股票代码, columns为['股票代码', '最近一次B1时间', 'B1出现次数']
+            - 股票的B1标记数据集: DataFrame, index为['交易时间', '股票代码'], columns为['小阴小阳', '十字星', 'B1']
+                               由所有相关股票的B1标记数据合并去重取得
     """
     # 验证参数：count和start_date不可同时使用
     if count is not None and start_date is not None:
@@ -1178,7 +1160,8 @@ def full_scan_b1_stocks(end_date=None, count=None, start_date=None, frequency='1
     # 遍历所有股票，找出符合B1条件的
     b1_stocks_data = []
     processed_count = 0
-    stock_b1_data = {}  # 股票代码 -> DataFrame(B1标记数据)
+    # 用于存储所有股票的B1标记数据（合并为DataFrame）
+    all_b1_markings = []  # 存储 all B1标记数据的列表
 
     for stock_code in filtered_stocks:
         try:
@@ -1201,7 +1184,10 @@ def full_scan_b1_stocks(end_date=None, count=None, start_date=None, frequency='1
                 })
 
                 # 保存B1标记数据
-                stock_b1_data[stock_code] = result
+                result_indexed = result.copy()
+                result_indexed['交易时间'] = result_indexed.index
+                result_indexed.set_index(['交易时间', '股票代码'], inplace=True)
+                all_b1_markings.append(result_indexed)
 
                 if debug:
                     print(f"发现B1股票: {stock_code} - "
@@ -1224,13 +1210,30 @@ def full_scan_b1_stocks(end_date=None, count=None, start_date=None, frequency='1
     # 返回Tuple
     if b1_stocks_data:
         result_df = pd.DataFrame(b1_stocks_data, index=None)
+        result_df.set_index('股票代码', inplace=True)
         # 确保列顺序
         result_df = result_df[['股票代码', '最近一次B1时间', 'B1出现次数']]
         # 按最近一次B1时间降序排序
-        result_df = result_df.sort_values(by='最近一次B1时间', ascending=False).reset_index(drop=True)
-        return result_df, stock_b1_data
+        result_df = result_df.sort_values(by='最近一次B1时间', ascending=False)
+
+        # 合并所有B1标记数据并去重
+        if all_b1_markings:
+            b1_data_df = pd.concat(all_b1_markings)
+            # 按索引去重（交易时间, 股票代码）
+            b1_data_df = b1_data_df[~b1_data_df.index.duplicated(keep='last')]
+        else:
+            b1_data_df = pd.DataFrame(columns=['小阴小阳', '十字星', 'B1'])
+            # 创建空的复合索引（交易时间, 股票代码）
+            b1_data_df.index = pd.MultiIndex.from_arrays([[], []], names=['交易时间', '股票代码'])
+
+        return result_df, b1_data_df
     else:
-        return pd.DataFrame(columns=['股票代码', '最近一次B1时间', 'B1出现次数']), {}
+        empty_df = pd.DataFrame(columns=['股票代码', '最近一次B1时间', 'B1出现次数'])
+        empty_df.index.name = '股票代码'
+        empty_b1_df = pd.DataFrame(columns=['小阴小阳', '十字星', 'B1'])
+        # 创建空的复合索引（交易时间, 股票代码）
+        empty_b1_df.index = pd.MultiIndex.from_arrays([[], []], names=['交易时间', '股票代码'])
+        return empty_df, empty_b1_df
 
 
 def calculate_concept_potential(b1_stocks_data=None, concept_names=None, group_names=None, end_date=None, count=None, start_date=None, frequency='1d', debug=False):
@@ -1298,13 +1301,13 @@ def calculate_concept_potential(b1_stocks_data=None, concept_names=None, group_n
     # 方式2: 根据concept_names调用batch_filter_stocks
     # 方式3: 根据group_names调用filter_custom_stocks
     # 方式4: 调用full_scan_b1_stocks进行全量扫描
-    stock_b1_data_dict = {}  # 用于存储股票的B1标记数据
+    stock_b1_data_df = None  # 用于存储股票的B1标记数据DataFrame
 
     if b1_stocks_data is None:
         if concept_names is not None:
             # 方式2: 根据板块名获取B1数据
             print(f"使用方式2：根据板块名 '{concept_names}' 获取B1股票数据...")
-            b1_stocks_data, stock_b1_data_dict = batch_filter_stocks(
+            b1_stocks_data, stock_b1_data_df = batch_filter_stocks(
                 concept_names=concept_names,
                 end_date=end_date,
                 count=count,
@@ -1315,7 +1318,7 @@ def calculate_concept_potential(b1_stocks_data=None, concept_names=None, group_n
         elif group_names is not None:
             # 方式3: 根据组别名获取B1数据
             print(f"使用方式3：根据组别名 '{group_names}' 获取B1股票数据...")
-            b1_stocks_data, stock_b1_data_dict = filter_custom_stocks(
+            b1_stocks_data, stock_b1_data_df = filter_custom_stocks(
                 group_names=group_names,
                 end_date=end_date,
                 count=count,
@@ -1326,7 +1329,7 @@ def calculate_concept_potential(b1_stocks_data=None, concept_names=None, group_n
         else:
             # 方式4: 全量扫描
             print("使用方式4：全量扫描获取B1股票数据...")
-            b1_stocks_data, stock_b1_data_dict = full_scan_b1_stocks(
+            b1_stocks_data, stock_b1_data_df = full_scan_b1_stocks(
                 end_date=end_date,
                 count=count,
                 start_date=start_date,
@@ -1337,7 +1340,9 @@ def calculate_concept_potential(b1_stocks_data=None, concept_names=None, group_n
     else:
         # 方式1: 直接使用提供的B1数据
         print("使用方式1：直接使用提供的B1股票数据")
-        # 如果b1_stocks_data是DataFrame，需要获取详细的B1标记数据
+        # 如果b1_stocks_data是tuple，提取B1标记数据
+        if isinstance(b1_stocks_data, tuple):
+            b1_stocks_data, stock_b1_data_df = b1_stocks_data
 
     # 初始化结果DataFrame
     concept_stats_df = pd.DataFrame(columns=['板块代码', '板块名称', '出现B1的股票数量', 'B1出现的总次数'])
@@ -1356,14 +1361,18 @@ def calculate_concept_potential(b1_stocks_data=None, concept_names=None, group_n
     # 获取详细的B1标记数据
     print("开始获取B1股票的详细标记数据...")
 
-    if stock_b1_data_dict:
-        # 使用已有的B1标记数据
-        for stock_code, b1_df in stock_b1_data_dict.items():
-            if not b1_df.empty and 'B1' in b1_df.columns:
-                b1_dates = b1_df[b1_df['B1'] == True].index.tolist()
+    if stock_b1_data_df is not None and not stock_b1_data_df.empty:
+        # 使用已有的B1标记DataFrame数据
+        # 按股票代码分组统计
+        if 'B1' in stock_b1_data_df.columns:
+            # 获取B1为True的行
+            b1_rows = stock_b1_data_df[stock_b1_data_df['B1'] == True]
+            # 按股票代码分组
+            for stock_code in b1_rows.index.get_level_values('股票代码').unique():
+                stock_b1_dates = b1_rows.loc[(slice(None), stock_code)].index.get_level_values('交易时间').tolist()
                 stock_b1_detail_info[stock_code] = {
-                    'B1次数': len(b1_dates),
-                    'B1日期列表': b1_dates
+                    'B1次数': len(stock_b1_dates),
+                    'B1日期列表': stock_b1_dates
                 }
     else:
         # 重新获取详细的B1标记数据
